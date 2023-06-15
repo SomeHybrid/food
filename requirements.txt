@@ -1,0 +1,4 @@
+psycopg[binary,pool]
+fastapi
+uvicorn
+pydantic
