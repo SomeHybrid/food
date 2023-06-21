@@ -14,7 +14,6 @@ conn: psycopg.AsyncConnection = asyncio.run(
 
 
 class Recipe(pydantic.BaseModel):
-    id: int
     name: str
     ingredients: list[str]
     original_ingredients: list[str]
@@ -22,52 +21,51 @@ class Recipe(pydantic.BaseModel):
 
 
 @app.get("/api/from_ingredient/{ingredient}")
-async def from_ingredient(ingredient: str) -> list[Recipe]:
+async def from_ingredient(ingredient: str):
     ingredients = ingredient.split(",")
     async with conn.cursor() as cur:
-        query = "SELECT * FROM recipe_ingredients WHERE " + " OR ".join(
-            ["ingredient %% (%s)" for _ in ingredients]
-        ) + " LIMIT 20"
-
-        await cur.execute(query, ingredients)
-        ingredients = await cur.fetchall()
-
-        if len(ingredients) == 0:
-            raise HTTPException(
-                status_code=404,
-                detail="No recipes found"
-            )
-
-        ids = tuple(i[0] for i in ingredients)
-
-        query = "SELECT * FROM recipes WHERE " + " OR ".join(
-            ["id=(%s)" for _ in ids]
+        placeholder = " OR ".join(
+            ["recipe_ingredients.ingredient %% (%s)" for _ in ingredients]
         )
+        query = f"""
+            SELECT
+                recipes.*,
+                array_agg(recipe_ingredients.ingredient) as "ingredients",
+                array_agg(recipe_ingredients.original_ingredient)
+                    as "original_ingredients",
+                SUM(
+                    CASE WHEN {placeholder}
+                        THEN 1 ELSE 0 
+                    END
+                ) AS matched_ingredients
+            FROM recipes
+            INNER JOIN recipe_ingredients
+            ON recipe_ingredients.recipe_id = recipes.id
+            WHERE recipes.id IN (
+                SELECT recipe_id FROM recipe_ingredients
+                WHERE {placeholder}
+                GROUP BY recipe_id
+            )
+            GROUP BY recipes.id
+            ORDER BY matched_ingredients DESC
+            LIMIT 20
+        """
 
-        await cur.execute(query, ids)
+        await cur.execute(query, ingredients + ingredients)
         recipes = await cur.fetchall()
 
-        data = []
-
-        query = """SELECT (
-            ingredient,
-            original_ingredient
-        ) FROM recipe_ingredients WHERE recipe_id=(%s)"""
-        for id, name, cuisine in recipes:
-            await cur.execute(query, (id,))
-            ingredients = await cur.fetchall()
-            ingredients = sum(ingredients, ())
-
-            ingredients, original_ingredients = list(zip(*ingredients))
-            data.append(
-                Recipe(
-                    id=id,
-                    name=name,
-                    ingredients=ingredients,
-                    original_ingredients=original_ingredients,
-                    cuisine=cuisine,
-                ),
+        if not recipes:
+            HTTPException(status_code=404, detail="No recipes found")
+        
+        data = [
+            Recipe(
+                name=i[1], 
+                cuisine=i[2], 
+                ingredients=i[3], 
+                original_ingredients=i[4]
             )
+            for i in recipes
+        ]
 
         return data
 
